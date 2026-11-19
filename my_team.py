@@ -7,6 +7,7 @@
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
 import random
+import time
 import contest.util as util
 
 from contest.capture_agents import CaptureAgent
@@ -71,9 +72,9 @@ class FroschCaptureAgent(CaptureAgent):
         actions = game_state.get_legal_actions(self.index)
 
         # You can profile your evaluation time by uncommenting these lines
-        # start = time.time()
+        start = time.time()
         values = [self.evaluate(game_state, a) for a in actions]
-        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
+        print('eval time for agent %d: %.4f' % (self.index, time.time() - start))
 
         max_value = max(values)
         best_actions = [a for a, v in zip(actions, values) if v == max_value]
@@ -123,7 +124,8 @@ class FroschCaptureAgent(CaptureAgent):
         features['successor_score'] = self.get_score(successor)
 
         # if we are carrying food, 
-        # the distance to our team's side should be considered
+        # the distance to our team's side should be considered,
+        # otherwise it doesn't matter
         if game_state.num_carrying > 0:
             features['distance_to_own_side'] = self.get_distance_to_own_side
         else:
@@ -145,6 +147,11 @@ class FroschCaptureAgent(CaptureAgent):
         else:
             features['near_ghost'] = 0
 
+        if (pos in self.find_dead_ends and features["near_ghost"] > 0):
+            features['dead_end'] = 1
+        else:
+            features['dead_end'] = 0
+
         return features
 
     def get_weights(self, game_state, action):
@@ -155,10 +162,10 @@ class FroschCaptureAgent(CaptureAgent):
         if self.should_return(game_state):
         # food doesnt matter anymore, we need to return to our side asap
             return {'successor_score': 100, 'nearest_food': 0,
-                    'distance_to_own_side': -10, 'near_ghost': 10}
+                    'distance_to_own_side': -10, 'near_ghost': 10, 'dead_end': 7}
         
         return {'successor_score': 100, 'nearest_food': -2,
-                'distance_to_own_side': 0, 'near_ghost': 4}
+                'distance_to_own_side': 0, 'near_ghost': 4, 'dead_end': 3}
 
     def get_distance_to_own_side(self, game_state):
         # own position
@@ -212,6 +219,20 @@ class FroschCaptureAgent(CaptureAgent):
         # if we carry a lot of food and our home is far away, we should return
         # otherwise we can keep exploring 
         return carrying >= 5 and home_distance > 5
+
+
+    # function to find dead ends
+    def find_dead_ends(self, game_state):
+        walls = game_state.get_walls()
+        width, height = walls.width, walls.height
+        dead_ends = set()
+        for x in range(width):
+            for y in range(height):
+                wall_count = sum(walls[x + dx][y + dy] 
+                                 for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)])
+                if not walls[x][y] and wall_count == 3:
+                    dead_ends.add((x, y))
+        return dead_ends
 
     
 class OffensiveFroschAgent(FroschCaptureAgent):
