@@ -54,6 +54,9 @@ class FroschCaptureAgent(CaptureAgent):
         self.was_pacman = False
         self.fled = False
         self.avoid_pos = None
+        self.last_eaten = None
+
+        self.dead_ends = self.find_dead_ends(game_state)
 
         # position of own side
         walls = game_state.get_walls()
@@ -71,16 +74,21 @@ class FroschCaptureAgent(CaptureAgent):
         self.boundary = [(self.mid_x, y) for y in range(height) if not walls[self.mid_x][y]] 
 
     def choose_action(self, game_state):
-        self.update_cooldown(game_state)
+        """
+        Picks among the actions with the highest Q(s,a).
+        """
         actions = game_state.get_legal_actions(self.index)
-        my_state = game_state.get_agent_state(self.index)
-        my_pos = game_state.get_agent_position(self.index)
 
-        ghosts = self.get_dangerous_ghosts(game_state)
-        food = self.get_food(game_state).as_list()
-        food_left = len(food)
+        # You can profile your evaluation time by uncommenting these lines
+        # start = time.time()
+        values = [self.evaluate(game_state, a) for a in actions]
+        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
 
-    
+        max_value = max(values)
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+
+        food_left = len(self.get_food(game_state).as_list())
+
         if food_left <= 2:
             best_dist = 9999
             best_action = None
@@ -93,23 +101,6 @@ class FroschCaptureAgent(CaptureAgent):
                     best_dist = dist
             return best_action
 
-        if self.cooldown > 0 and not my_state.is_pacman and food:
-            plan = self.astar(game_state, my_pos, food, ghosts)
-            if plan:
-                return plan[0]
-
-       
-        if my_state.is_pacman and self.should_return(game_state):
-            if ghosts:
-                self.fled = True
-            plan = self.astar(game_state, my_pos, self.boundary, ghosts)
-            if plan:
-                return plan[0]
-
-
-        values = [self.evaluate(game_state, a) for a in actions]
-        max_value = max(values)
-        best_actions = [a for a, v in zip(actions, values) if v == max_value]
         return random.choice(best_actions)
 
     def get_successor(self, game_state, action):
@@ -139,40 +130,6 @@ class FroschCaptureAgent(CaptureAgent):
         features = util.Counter()
         successor = self.get_successor(game_state, action)
         features['successor_score'] = self.get_score(successor)
-
-        # if we are carrying food, 
-        # the distance to our team's side should be considered,
-        # otherwise it doesn't matter
-        if game_state.num_carrying > 0:
-            features['distance_to_own_side'] = self.get_distance_to_own_side
-        else:
-            features['distance_to_own_side'] = 0
-
-        foods = self.get_food(successor).as_list()
-        pos = game_state.get_position()
-        food_distances = []
-
-        # go through all foods and find the nearest one
-        for food in foods:
-            food_distances.append(self.get_maze_distance(pos, food))
-        features['nearest_food'] = min(food_distances)
-
-        # going through the visible ghosts
-        ghosts = self.get_dangerous_ghosts(game_state)
-        for ghost in ghosts:
-            ghost_position = ghost.get_position()
-            distance = self.get_maze_distance(pos, ghost_position)
-            timer = ghost.scared_timer
-            if distance <= timer:
-                features['near_ghost'] = distance
-            else:
-                features['near_ghost'] = 0
-
-        if (pos in self.find_dead_ends and features["near_ghost"] > 0):
-            features['dead_end'] = 1
-        else:
-            features['dead_end'] = 0
-
         return features
 
     def get_weights(self, game_state, action):
@@ -180,13 +137,7 @@ class FroschCaptureAgent(CaptureAgent):
         Normally, weights do not depend on the game state.  They can be either
         a counter or a dictionary.
         """
-        if self.should_return(game_state):
-        # food doesnt matter anymore, we need to return to our side asap
-            return {'successor_score': 100, 'nearest_food': 0,
-                    'distance_to_own_side': -10, 'near_ghost': 10, 'dead_end': 7}
-        
-        return {'successor_score': 100, 'nearest_food': -2,
-                'distance_to_own_side': 0, 'near_ghost': 7, 'dead_end': 3}
+        return {'successor_score': 1.0}
 
     def get_distance_to_own_side(self, game_state):
         # own position
@@ -220,9 +171,6 @@ class FroschCaptureAgent(CaptureAgent):
         if carrying == 0:
             return False
 
-        # distance to our team's side
-        home_distance = self.get_distance_to_own_side(game_state)
-
         ghosts = self.get_dangerous_ghosts(game_state)
         for ghost in ghosts:
             ghost_pos = ghost.get_position()
@@ -233,10 +181,7 @@ class FroschCaptureAgent(CaptureAgent):
             # if there is a ghost near, we should retreat now!!
             if (distance*carrying) <= 20 and timer <= distance:
                 return True            
-
-        # if we carry a lot of food and our home is far away, we should return
-        # otherwise we can keep exploring 
-        return carrying >= 5 and home_distance > 5
+        return False
 
 
     # function to find dead ends
@@ -255,7 +200,7 @@ class FroschCaptureAgent(CaptureAgent):
         return dead_ends
 
     def is_enemy_side(self, pos):
-        return pos[0] > self.mix_x if self.red else pos[0] < self.mid_x
+        return pos[0] > self.mid_x if self.red else pos[0] < self.mid_x
 
     # this function updates the cooldown so that after pacman fled an enemy
     # and arrived at its own side, it does not immediately return to the 
@@ -294,12 +239,11 @@ class FroschCaptureAgent(CaptureAgent):
         for ghost in ghosts:
             ghost_pos = ghost.get_position()
             distance = self.get_maze_distance(pos, ghost_pos)
-            dead_ends = self.find_dead_ends(game_state)
             # the nearer the ghost is, the higher the cost of going there
             if distance <= 4:
                 cost += (5 - distance) * 5   
             # if the "node" is a dead end, taking it is risky   
-            if ghosts and pos in dead_ends:
+            if ghosts and pos in self.dead_ends:
                 cost += 20   
             # if we are in cooldown-mode, 
             # we should avoid the place where we crossed the border
@@ -340,7 +284,7 @@ class FroschCaptureAgent(CaptureAgent):
                 if walls[nxt[0]][nxt[1]] or nxt in visited:
                     continue
                 new_cost = cost + 1 + self.step_cost(game_state, nxt, ghosts)
-                estimate = self.heuristic(pos, goals)
+                estimate = self.heuristic(nxt, goals)
                 prio_queue.push((nxt, path + [direction], new_cost),
                                 new_cost + estimate)
         return []
@@ -353,24 +297,137 @@ class OffensiveFroschAgent(FroschCaptureAgent):
   but it is by no means the best or only way to build an offensive agent.
   """
 
+    def choose_action(self, game_state):
+        self.update_cooldown(game_state)
+        actions = game_state.get_legal_actions(self.index)
+        my_state = game_state.get_agent_state(self.index)
+        my_pos = game_state.get_agent_position(self.index)
+
+        ghosts = self.get_dangerous_ghosts(game_state)
+        food = self.get_food(game_state).as_list()
+        food_left = len(food)
+
+        if my_state.is_pacman and ghosts:
+            d = min(self.get_maze_distance(my_pos, g.get_position()) for g in ghosts)
+            if d <= 5:
+                self.fled = True
+    
+        if food_left <= 2:
+            best_dist = 9999
+            best_action = None
+            for action in actions:
+                successor = self.get_successor(game_state, action)
+                pos2 = successor.get_agent_position(self.index)
+                dist = self.get_maze_distance(self.start, pos2)
+                if dist < best_dist:
+                    best_action = action
+                    best_dist = dist
+            print(self.index, my_pos, 'mode=food<2', self.cooldown)
+            return best_action
+
+        if self.cooldown > 0 and not my_state.is_pacman and food:
+            plan = self.astar(game_state, my_pos, food, ghosts)
+            if plan:
+                print(self.index, my_pos, 'mode=cooldown', self.cooldown)
+                return plan[0]
+
+        
+        if my_state.is_pacman and self.should_return(game_state):
+            if ghosts:
+                self.fled = True
+            plan = self.astar(game_state, my_pos, self.boundary, ghosts)
+            if plan:
+                print(self.index, my_pos, 'mode=flee', self.cooldown)
+                return plan[0]
+
+
+        values = [self.evaluate(game_state, a) for a in actions]
+        max_value = max(values)
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+        print(self.index, my_pos, 'mode=eval', self.cooldown)
+        return random.choice(best_actions)
+
+    
     def get_features(self, game_state, action):
         features = util.Counter()
         successor = self.get_successor(game_state, action)
-        food_list = self.get_food(successor).as_list()
-        features['successor_score'] = -len(food_list)  # self.getScore(successor)
-        
-        # Compute distance to the nearest food
+        my_state = successor.get_agent_state(self.index)
+        pos = my_state.get_position()
+        foods = self.get_food(successor).as_list()
 
-        if len(food_list) > 0:  # This should always be True, but better safe than sorry
-            my_pos = successor.get_agent_state(self.index).get_position()
-            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-            features['distance_to_food'] = min_distance
+        # the less food left, the better
+        features['successor_score'] = -len(foods) 
+        
+        # go through all foods and find the closest one
+        if foods:
+            features['distance_to_food'] = min(
+                self.get_maze_distance(pos, f) for f in foods)
+
+        # ghosts only matter if we are pacman atm
+        ghosts = self.get_dangerous_ghosts(successor) if my_state.is_pacman else []
+        if ghosts:
+            # find the closest ghost
+            ghost_dist = min(self.get_maze_distance(pos, g.get_position())
+                             for g in ghosts)
+            # ghost next to us
+            if ghost_dist <= 1:
+                features['ghost_next'] = 1
+            # ghost close to us
+            if ghost_dist <= 5:
+                features['ghost_close'] = 6 - ghost_dist
+            # we are in a dead-end
+            if pos in self.dead_ends:
+                features['in_dead_end'] = 1
+ 
+            capsules = self.get_capsules(successor)
+            # find the closest capsule, we can use it if a ghost is near
+            if capsules:
+                features['distance_to_capsule'] = min(
+                    self.get_maze_distance(pos, c) for c in capsules)
+ 
+        
+        carrying = my_state.num_carrying
+        if carrying > 0 and my_state.is_pacman:
+            # the more food we carry, the sooner we should return to our side
+            features['return_home'] = carrying * self.get_distance_to_own_side(successor)
+ 
+        # to punish stopping or going back (to stop pacman from oscillating)
+        if action == Directions.STOP:
+            features['stop'] = 1
+        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
+        if action == rev:
+            features['reverse'] = 1
+ 
         return features
 
     def get_weights(self, game_state, action):
-        return {'successor_score': 100, 'distance_to_food': -1}
+        if self.should_return(game_state):
+            # food doesnt matter anymore, we need to return to our side asap
+            # or get a capsule
+            return {
+                    'successor_score': 100,
+                    'distance_to_food': 0,
+                    'distance_to_capsule': -10,
+                    'ghost_adjacent': -1000,
+                    'ghost_proximity': -50,
+                    'in_dead_end': -50,
+                    'return_home': -3,
+                    'stop': -100,
+                    'reverse': -2,
+                    }
+        return {
+            'successor_score': 100,
+            'distance_to_food': -3,
+            'distance_to_capsule': -2,
+            'ghost_adjacent': -1000,
+            'ghost_proximity': -20,
+            'in_dead_end': -20,
+            'return_home': -0.5,
+            'stop': -100,
+            'reverse': -2,
+        }
 
-
+        
 class DefensiveFroschAgent(FroschCaptureAgent):
     """
     A reflex agent that keeps its side Pacman-free. Again,
@@ -378,31 +435,86 @@ class DefensiveFroschAgent(FroschCaptureAgent):
     could be like.  It is not the best or only way to make
     such an agent.
     """
+ 
+    def choose_action(self, game_state):
+        self.update_eaten_guess(game_state)
+        actions = game_state.get_legal_actions(self.index)
+        values = [self.evaluate(game_state, a) for a in actions]
+        max_value = max(values)
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+        return random.choice(best_actions)
+ 
+    # finds the place where food on our side was eaten last
+    # to try to track enemies we cannot see
+    def update_eaten_guess(self, game_state):
+        prev = self.get_previous_observation()
+        if prev is not None:
+            before = set(self.get_food_you_are_defending(prev).as_list())
+            now = set(self.get_food_you_are_defending(game_state).as_list())
+            eaten = before - now
+            if eaten:
+                self.last_eaten = next(iter(eaten))
+        # if we went to the place and no one is there, forget about it
+        my_pos = game_state.get_agent_position(self.index)
+        if self.last_eaten is not None and my_pos == self.last_eaten:
+            self.last_eaten = None
+ 
+    # finds a patrol point close to our own food
+    def get_patrol_target(self, game_state):
+        food = self.get_food_you_are_defending(game_state).as_list()
+        if not food:
+            return self.boundary[len(self.boundary) // 2]
+        return min(self.boundary,
+                   key=lambda b: sum(self.get_maze_distance(b, f) for f in food))
 
+ 
     def get_features(self, game_state, action):
         features = util.Counter()
         successor = self.get_successor(game_state, action)
-
         my_state = successor.get_agent_state(self.index)
         my_pos = my_state.get_position()
-
-        # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
-
-        # Computes distance to invaders we can see
+ 
+        # to stay on our side as defense
+        features['on_defense'] = 0 if my_state.is_pacman else 1
+ 
+        # number of visible enemies on our side
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
+        invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
         features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
+ 
+        if invaders:
+            # find the closest invader
+            d = min(self.get_maze_distance(my_pos, e.get_position()) for e in invaders)
+            if my_state.scared_timer > 0:
+                # if we are scared, we shouldnt get close as to not get eaten
+                features['scared_invader_dist'] = abs(d - 2)
+            else:
+                features['invader_distance'] = d
+        elif self.last_eaten is not None:
+            # if we dont see any invaders but food was eaten, we know someone is there
+            features['distance_to_eaten'] = self.get_maze_distance(my_pos, self.last_eaten)
+        else:
+            # if there is no one visible and no one eating, we go on patrol
+            features['patrol_distance'] = self.get_maze_distance(
+                my_pos, self.get_patrol_target(game_state))
 
-        if action == Directions.STOP: features['stop'] = 1
+        # to stop pacman from oscillating
+        if action == Directions.STOP:
+            features['stop'] = 1
         rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
-
+        if action == rev:
+            features['reverse'] = 1
+ 
         return features
-
+ 
     def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}     
+        return {
+            'on_defense': 100,
+            'num_invaders': -1000,
+            'invader_distance': -10,
+            'scared_invader_dist': -10,
+            'distance_to_eaten': -5,
+            'patrol_distance': -3,
+            'stop': -100,
+            'reverse': -2,
+        }
